@@ -39,7 +39,7 @@ die() {
 	exit 1
 }
 
-[[ ${BASH_VERSINFO[0]} -ge 4 ]] || die "Version mismatch: bash ${BASH_VERSINFO[0]} detected, when bash 4+ required"
+# [[ ${BASH_VERSINFO[0]} -ge 4 ]] || die "Version mismatch: bash ${BASH_VERSINFO[0]} detected, when bash 4+ required"
 
 CONFIG_SEARCH_PATHS=( /etc/wireguard /usr/local/etc/wireguard )
 
@@ -215,29 +215,38 @@ collect_endpoints() {
 	done < <(wg show "$REAL_INTERFACE" endpoints)
 }
 
-declare -A SERVICE_DNS
-declare -A SERVICE_DNS_SEARCH
+declare -a SERVICE_DNS_KEY
+declare -a SERVICE_DNS_VAL
+# declare -A SERVICE_DNS_SEARCH
 collect_new_service_dns() {
+	local old_key old_val
 	local service get_response
-	local -A found_services
+	# local -A found_services
+	local idx
+
+	old_key=("${SERVICE_DNS_KEY[@]}")
+	old_val=("${SERVICE_DNS_VAL[@]}")
+	SERVICE_DNS_KEY=()
+	SERVICE_DNS_VAL=()
 	{ read -r _ && while read -r service; do
 		[[ $service == "*"* ]] && service="${service:1}"
-		found_services["$service"]=1
-		[[ -n ${SERVICE_DNS["$service"]} ]] && continue
-		get_response="$(cmd networksetup -getdnsservers "$service")"
-		[[ $get_response == *" "* ]] && get_response="Empty"
-		[[ -n $get_response ]] && SERVICE_DNS["$service"]="$get_response"
-		get_response="$(cmd networksetup -getsearchdomains "$service")"
-		[[ $get_response == *" "* ]] && get_response="Empty"
-		[[ -n $get_response ]] && SERVICE_DNS_SEARCH["$service"]="$get_response"
-	done; } < <(networksetup -listallnetworkservices)
-
-	for service in "${!SERVICE_DNS[@]}"; do
-		if ! [[ -n ${found_services["$service"]} ]]; then
-			unset SERVICE_DNS["$service"]
-			unset SERVICE_DNS_SEARCH["$service"]
+		get_response=""
+		for idx in "${!old_key[@]}"; do
+			if [[ $service = ${old_key[$idx]} ]]; then
+				get_response="${old_val[$idx]}"
+				unset old_key[$idx]
+				break
+			fi
+		done
+		if [[ -z $get_response ]]; then
+			get_response="$(cmd networksetup -getdnsservers "$service")"
+			[[ $get_response == *" "* ]] && get_response="Empty"
 		fi
-	done
+		if [[ -n $get_response ]]; then
+			SERVICE_DNS_KEY+=("$service")
+			SERVICE_DNS_VAL+=("$get_response")
+		fi
+ 	done; } < <(networksetup -listallnetworkservices)
 }
 
 set_endpoint_direct_route() {
@@ -294,7 +303,7 @@ set_endpoint_direct_route() {
 set_dns() {
 	collect_new_service_dns
 	local service response
-	for service in "${!SERVICE_DNS[@]}"; do
+	for service in "${SERVICE_DNS_KEY[@]}"; do
 		while read -r response; do
 			[[ $response == *Error* ]] && echo "$response" >&2
 		done < <(
@@ -309,14 +318,11 @@ set_dns() {
 }
 
 del_dns() {
-	local service response
-	for service in "${!SERVICE_DNS[@]}"; do
+	local idx response
+	for idx in "${!SERVICE_DNS_KEY[@]}"; do
 		while read -r response; do
 			[[ $response == *Error* ]] && echo "$response" >&2
-		done < <(
-			cmd networksetup -setdnsservers "$service" ${SERVICE_DNS["$service"]} || true
-			cmd networksetup -setsearchdomains "$service" ${SERVICE_DNS_SEARCH["$service"]} || true
-		)
+		done < <(cmd networksetup -setdnsservers "${SERVICE_DNS_KEY[$idx]}" ${SERVICE_DNS_VAL[$idx]} || true)
 	done
 }
 
@@ -324,6 +330,7 @@ monitor_daemon() {
 	echo "[+] Backgrounding route monitor" >&2
 	(trap 'del_routes; del_dns; exit 0' INT TERM EXIT
 	exec >/dev/null 2>&1
+	[[ ${BASH_VERSINFO[0]} -ge 4 ]] || BASHPID=$(sh -c 'echo $PPID')
 	exec 19< <(exec route -n monitor)
 	local event bpid=$BASHPID mpid=$!
 	[[ ${#DNS[@]} -gt 0 ]] && trap set_dns ALRM
